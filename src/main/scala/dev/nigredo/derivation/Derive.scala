@@ -1,6 +1,6 @@
 package dev.nigredo.derivation
 
-import scala.annotation.StaticAnnotation
+import scala.annotation.{StaticAnnotation, tailrec}
 import scala.language.experimental.macros
 import scala.reflect.api.Trees
 import scala.reflect.macros.blackbox
@@ -75,8 +75,6 @@ case class Def(ident: String, className: String, excludeFields: List[String] = N
   *     }
   * }}}
   *
-  * Restriction: All data structure has to be define in top level.
-  *
   * @param config derivation config
   */
 class Derive(config: Def*) extends StaticAnnotation {
@@ -87,6 +85,15 @@ object Derive {
 
   def impl(c: blackbox.Context)(annottees: c.Expr[Any]*): c.Expr[Any] = {
     import c.universe._
+
+    @tailrec
+    def buildTypePath(path: Seq[String], value: c.universe.Tree = q""): c.universe.Tree =
+      if (path.size == 1) tq"$value.${TypeName(path.head)}"
+      else {
+        val name = TermName(path.head)
+        buildTypePath(path.tail, if (value.isEmpty) q"$name" else q"$value.$name")
+      }
+
 
     def isPrimitive(clazz: String): Boolean = {
       val typeName = TypeName(clazz)
@@ -193,7 +200,7 @@ object Derive {
           Store.params += (tpname.asInstanceOf[TypeName].encodedName.toString -> config)
           val finalTree = config.map { conf =>
             q"""object ${TermName(conf.ident)} {
-                 sealed trait ${TypeName(sealedDerivationName)}
+                 trait ${TypeName(sealedDerivationName)}
                 };"""
           }
           val companion = tail match {

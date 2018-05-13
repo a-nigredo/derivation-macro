@@ -90,17 +90,4 @@ _dev.nigredo.derivation.Def_ is a configuration new derivation and consist of:
   * **excludeFields** - define which fields have to be excluded from new derivation
   * **rename**        - define how to rename fields during derivation
 
-### Restriction
-All definition of the structure(case classes, traits etc.) have to be at the top level of the file. Thus such structure:
-```scala
-@Derive(Def("Bar", "MyNewCaseClass", List("value")))
-case class Foo(value: Foo2)
-
-object Foo {
-    @Derive(Def("Bar", "MyNewCaseClass", List("value")))
-    case class Foo2(value: Int)   
-}
-```
-wil not compile
-
 If you have any questions or suggestions just create an issue on github or send me an email to [a.nigredo@gmail.com](a.nigredo@gmail.com)

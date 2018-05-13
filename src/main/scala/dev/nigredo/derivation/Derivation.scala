@@ -39,9 +39,10 @@ object DerivationImpl {
 
     def getDerivation(classSymbol: ClassSymbol, values: Seq[Seq[Tree]], phantomType: Option[Tree] = None): c.universe.Tree = {
       val conf = getConfig(classSymbol)
+      val `type` = buildTypePath(classSymbol.fullName.split("\\.") ++ List(conf.ident, conf.className))
       phantomType match {
-        case Some(phantom) => q"new ${tq"${classSymbol.name.toTermName}.${TermName(conf.ident)}.${TypeName(conf.className)}"}(...$values) with $phantom"
-        case None => q"new ${tq"${classSymbol.name.toTermName}.${TermName(conf.ident)}.${TypeName(conf.className)}"}(...$values)"
+        case Some(phantom) => q"new ${`type`}(...$values) with $phantom"
+        case None => q"new ${`type`}(...$values)"
       }
     }
 
@@ -53,6 +54,18 @@ object DerivationImpl {
         if (value.isEmpty) buildPath(path.tail, q"$field")
         else buildPath(path.tail, q"$value.$field")
       }
+
+    @tailrec
+    def buildTypePath(path: Seq[String], value: c.universe.Tree = q""): c.universe.Tree =
+      if (path.size == 1) tq"$value.${TypeName(path.head)}"
+      else {
+        val name = TermName(path.head)
+        buildTypePath(path.tail, if (value.isEmpty) q"$name" else q"$value.$name")
+      }
+
+    def buildPhantomType(sym: ClassSymbol, conf: Def): c.universe.Tree = {
+      buildTypePath(sym.fullName.toString.split("\\.") ++ List(conf.ident, sealedDerivationName))
+    }
 
     def gen(cs: ClassSymbol, parents: Seq[TermName]): Seq[Seq[c.universe.Tree]] = {
 
@@ -74,42 +87,52 @@ object DerivationImpl {
 
         val classSymbol = sym.typeSignature.typeSymbol.asClass
 
-        val value = if (classSymbol.isDerivedValueClass) {
-          buildPath(parents.:+(sym.name.toTermName).:+(extractAnyValParam(classSymbol).name.toTermName), q"")
-        } else if (classSymbol.isCaseClass) {
-          val values: Seq[Seq[Tree]] = getPrimaryCtorParams(classSymbol).map(_.filter(x => isNotExcluded(x, conf)).flatMap { s =>
-            val classSym = s.typeSignature.typeSymbol.asClass
-            if (classSym.isCaseClass)
-              Seq(getDerivation(classSym, gen(classSym, parents ++ List(sym.name.toTermName, s.name.encodedName.toTermName))))
-            else Seq(buildPath(parents.:+(sym.name.toTermName).:+(s.name.toTermName), q""))
-          })
-          getDerivation(classSymbol, values)
-        } else if (classSymbol.isPrimitive || c.universe.definitions.StringClass.name == classSymbol.name) {
-          buildPath(parents.:+(sym.name.toTermName), q"")
-        }
-        else if (classSymbol.isTrait && classSymbol.isSealed) {
-          q"${buildPath(parents.:+(sym.name.toTermName), q"")} match {case ..${
-            classSymbol.knownDirectSubclasses.map(x => {
-              val name = TermName(c.freshName())
-              val phantomType = tq"${classSymbol.name.toTermName}.${TermName(conf.ident)}.${TypeName(sealedDerivationName)}"
-              cq"$name: ${x.asType.name.toTypeName} => ${getDerivation(x.asClass, gen(x.asClass, List(name)), Some(phantomType))}"
+        val value =
+          if (classSymbol.isDerivedValueClass) {
+            buildPath(parents.:+(sym.name.toTermName).:+(extractAnyValParam(classSymbol).name.toTermName), q"")
+          } else if (classSymbol.isCaseClass) {
+            val values = getPrimaryCtorParams(classSymbol).map(_.filter(x => isNotExcluded(x, conf)).flatMap { s =>
+              val classSym = s.typeSignature.typeSymbol.asClass
+              if (classSym.isDerivedValueClass)
+                Seq(buildPath(parents.:+(sym.name.toTermName).:+(s.name.toTermName).:+(extractAnyValParam(classSym).name.toTermName), q""))
+              else if (classSym.isCaseClass)
+                Seq(getDerivation(classSym, gen(classSym, parents ++ List(sym.name.toTermName, s.name.encodedName.toTermName))))
+              else Seq(buildPath(parents.:+(sym.name.toTermName).:+(s.name.toTermName), q""))
             })
-          }}"
-        }
-        else if (classSymbol.toType.<:<(typeOf[Option[Any]]) || classSymbol.toType.<:<(typeOf[Seq[Any]])) {
-          val funcParamName = TermName(c.freshName())
-          val typeArgsSymbol = sym.typeSignature.typeArgs.head.typeSymbol.asClass
-          val func =
-            if (typeArgsSymbol.isDerivedValueClass) {
-              q"_.${extractAnyValParam(typeArgsSymbol).name.toTermName}"
-            } else if (typeArgsSymbol.isCaseClass) {
-              q"($funcParamName: ${typeArgsSymbol.name.toTypeName}) => ${getDerivation(typeArgsSymbol, gen(typeArgsSymbol, List(funcParamName)))}"
-            } else q"identity"
-          q"${buildPath(parents.:+(sym.name.toTermName), q"")}.map($func)"
-        }
-        else {
-          c.abort(c.enclosingPosition, s"Unsupported type ${sym.fullName}. Support: Value classes, Case classes, primitives and sealed traits")
-        }
+            getDerivation(classSymbol, values)
+          } else if (classSymbol.isPrimitive || c.universe.definitions.StringClass.name == classSymbol.name) {
+            buildPath(parents.:+(sym.name.toTermName), q"")
+          }
+          else if (classSymbol.isTrait && classSymbol.isSealed) {
+            q"${buildPath(parents.:+(sym.name.toTermName), q"")} match {case ..${
+              classSymbol.knownDirectSubclasses.map(x => {
+                val name = TermName(c.freshName())
+                cq"$name: ${buildTypePath(x.asType.fullName.split("\\."))} => ${getDerivation(x.asClass, gen(x.asClass, List(name)), Some(buildPhantomType(classSymbol, conf)))}"
+              })
+            }}"
+          }
+          else if (classSymbol.toType.<:<(typeOf[Option[Any]]) || classSymbol.toType.<:<(typeOf[Seq[Any]])) {
+            val funcParamName = TermName(c.freshName())
+            val typeArgsSymbol = sym.typeSignature.typeArgs.head.typeSymbol.asClass
+            val func =
+              if (typeArgsSymbol.isDerivedValueClass) {
+                q"_.${extractAnyValParam(typeArgsSymbol).name.toTermName}"
+              } else if (typeArgsSymbol.isTrait && typeArgsSymbol.isSealed) {
+                q"""($funcParamName: ${typeArgsSymbol.name.toTypeName}) =>
+                      $funcParamName match {case ..${
+                  typeArgsSymbol.knownDirectSubclasses.map(x => {
+                    val name = TermName(c.freshName())
+                    cq"$name: ${buildTypePath(x.asType.fullName.split("\\."))} => ${getDerivation(x.asClass, gen(x.asClass, List(name)), Some(buildPhantomType(typeArgsSymbol.asClass, conf)))}"
+                  })
+                }}"""
+              } else if (typeArgsSymbol.isCaseClass) {
+                q"($funcParamName: ${buildTypePath(typeArgsSymbol.fullName.split("\\."))}) => ${getDerivation(typeArgsSymbol, gen(typeArgsSymbol, List(funcParamName)))}"
+              } else q"identity"
+            q"${buildPath(parents.:+(sym.name.toTermName), q"")}.map($func)"
+          }
+          else {
+            c.abort(c.enclosingPosition, s"Unsupported type ${sym.fullName}. Support: Value classes, Case classes, primitives and sealed traits")
+          }
         q"${TermName(rename(sym.name.toTermName.encodedName.toString))} = $value"
       })
     }
